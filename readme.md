@@ -25,7 +25,7 @@ Createnko analyzes successful Facebook Ads videos from competitors and your prod
 
 1. **Clone the repository**
 ```bash
-git clone https://github.com/yourusername/createnko.git
+git clone https://github.com/BuhaiovDmytro/Createnko.git
 cd createnko
 ```
 
