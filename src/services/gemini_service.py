@@ -4,6 +4,7 @@ import logging
 import google.generativeai as genai
 from google.generativeai.types import File
 from typing import Optional, List, Dict, Any
+from datetime import datetime
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -93,9 +94,9 @@ def upload_video_to_gemini(video_path: str) -> File:
         raise
 
 
-def analyze_video_with_gemini(model: genai.GenerativeModel, video_file: File, prompt: str) -> str:
+def _analyze_video_with_model(model: genai.GenerativeModel, video_file: File, prompt: str) -> str:
     """
-    Analyze a video using Gemini with a custom prompt.
+    Analyze a video using Gemini with a custom prompt (internal helper function).
     
     Args:
         model: Configured Gemini model instance
@@ -285,3 +286,103 @@ def cleanup_gemini_file(file_name: str):
         logger.info(f"Cleaned up Gemini file: {file_name}")
     except Exception as e:
         logger.warning(f"Failed to cleanup Gemini file {file_name}: {str(e)}")
+
+
+async def analyze_video_with_gemini(media_url: str, brand_name: str = None, ad_id: str = None) -> Dict[str, Any]:
+    """
+    Analyze a video from URL using Gemini.
+    
+    Args:
+        media_url: URL of the video to analyze
+        brand_name: Optional brand name for context
+        ad_id: Optional ad ID for context
+        
+    Returns:
+        Dict with analysis results
+    """
+    import requests
+    import tempfile
+    
+    try:
+        # Check if we have Gemini API key
+        gemini_api_key = os.getenv('GEMINI_API_KEY')
+        if not gemini_api_key:
+            raise Exception("Gemini API key not configured")
+        
+        # Configure Gemini model
+        model = configure_gemini()
+        
+        # Download video
+        
+        response = requests.get(media_url.strip(), timeout=30)
+        response.raise_for_status()
+        
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_file:
+            temp_file.write(response.content)
+            video_path = temp_file.name
+        
+        try:
+            # Upload video to Gemini
+            video_file = upload_video_to_gemini(video_path)
+            
+            # Create analysis prompt
+            prompt = f"""
+            Analyze this Facebook ad video in detail. Focus on:
+            
+            1. Visual elements and composition
+            2. Brand messaging and positioning
+            3. Call-to-action strategies
+            4. Target audience appeal
+            5. Emotional triggers used
+            6. Product/service presentation
+            7. Visual storytelling techniques
+            8. Color schemes and visual style
+            9. Text overlays and graphics
+            10. Overall effectiveness and engagement potential
+            
+            Brand: {brand_name or 'Unknown'}
+            Ad ID: {ad_id or 'Unknown'}
+            
+            Provide a comprehensive analysis that would be useful for creating similar effective video content.
+            """
+            
+            # Analyze video
+            analysis_text = _analyze_video_with_model(model, video_file, prompt)
+            
+            # Get file metadata
+            file_size_mb = round(len(response.content) / (1024 * 1024), 2)
+            
+            # Cleanup
+            cleanup_gemini_file(video_file.name)
+            
+            return {
+                "success": True,
+                "analysis": {
+                    "raw_analysis": analysis_text,
+                    "brand_name": brand_name,
+                    "ad_id": ad_id,
+                    "media_url": media_url
+                },
+                "video_metadata": {
+                    "file_size_mb": file_size_mb,
+                    "duration_seconds": None  # Could be extracted with ffmpeg
+                },
+                "model_used": "gemini-1.5-pro",
+                "analysis_timestamp": datetime.now().isoformat()
+            }
+            
+        finally:
+            # Cleanup temporary file
+            try:
+                os.unlink(video_path)
+            except:
+                pass
+                
+    except Exception as e:
+        logger.error(f"Video analysis failed for {media_url}: {str(e)}")
+        return {
+            "success": False,
+            "message": f"Analysis failed: {str(e)}",
+            "error": str(e)
+        }

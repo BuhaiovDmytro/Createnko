@@ -2,6 +2,8 @@ from mcp.server.fastmcp import FastMCP
 from src.services.scrapecreators_service import get_platform_id, get_ads, get_scrapecreators_api_key, get_platform_ids_batch, get_ads_batch, CreditExhaustedException, RateLimitException
 from src.services.media_cache_service import media_cache, image_cache  # Keep image_cache for backward compatibility
 from src.services.gemini_service import configure_gemini, upload_video_to_gemini, analyze_video_with_gemini, cleanup_gemini_file, analyze_videos_batch_with_gemini, upload_videos_batch_to_gemini, cleanup_gemini_files_batch
+from src.services.trend_analysis_service import trend_analysis_service
+from src.services.video_generator_service import video_generator_service
 from typing import Dict, Any, List, Optional, Union
 import requests
 import base64
@@ -14,14 +16,16 @@ load_dotenv()
 
 
 INSTRUCTIONS = """
-This server provides access to Meta's Ad Library data through the ScrapeCreators API.
-It allows you to search for companies/brands and retrieve their currently running advertisements.
+This server provides access to Meta's Ad Library data through the ScrapeCreators API and advanced trend analysis for video generators.
+It allows you to search for companies/brands, retrieve their currently running advertisements, analyze trends, and generate video descriptions for AI video generators like Veo.
 
 Workflow:
 1. Use get_meta_platform_id to search for a brand and get their Meta Platform ID
 2. Use get_meta_ads to retrieve the brand's current ads using the platform ID
+3. Use analyze_trends_for_video_generation to analyze trends and generate video descriptions
+4. Use generate_video_description to create optimized prompts for video generators
 
-The API provides real-time access to Facebook Ad Library data including ad content, media, dates, and targeting information.
+The API provides real-time access to Facebook Ad Library data including ad content, media, dates, targeting information, and AI-powered trend analysis for video content creation.
 """
 
 
@@ -789,6 +793,365 @@ def search_cached_images(brand_name: Optional[str] = None, has_people: Optional[
     return search_cached_media(brand_name, has_people, color_contains, 'image', limit)
 
 cleanup_image_cache = cleanup_media_cache
+
+
+@mcp.tool(
+  description="Analyze trends from Facebook Ads Library data and generate video descriptions for AI video generators like Veo, Runway, Pika, etc. This tool combines trend analysis with video generation recommendations to create optimized prompts for video creation.",
+  annotations={
+    "title": "Analyze Trends for Video Generation",
+    "readOnlyHint": True,
+    "openWorldHint": True
+  }
+)
+def analyze_trends_for_video_generation(
+    brand_names: Union[str, List[str]], 
+    user_query: str,
+    generator_type: str = "veo",
+    limit: Optional[int] = 50,
+    country: Optional[str] = None,
+    style_preferences: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Analyze trends from Facebook Ads Library and generate video descriptions for AI video generators.
+    
+    This endpoint searches for brands, retrieves their ads, analyzes trends, and generates
+    optimized video descriptions for AI video generators like Veo, Runway, Pika, etc.
+    
+    Args:
+        brand_names: Single brand name (str) or list of brand names (List[str]) to analyze.
+                    Examples: "Nike", ["Nike", "Adidas", "Puma"]
+        user_query: User's original request/query for video generation.
+                    Example: "Create a trending fitness video for social media"
+        generator_type: Type of video generator to optimize for (default: "veo").
+                       Options: "veo", "runway", "pika", "stable_video", "sora"
+        limit: Maximum number of ads to analyze per brand (default: 50, max: 500).
+        country: Optional country code to filter ads by geographic targeting.
+                 Examples: "US", "CA", "GB", "AU". If not provided, returns ads from all countries.
+        style_preferences: Optional style preferences dict with keys like:
+                          - color_scheme: "bright", "dark", "neutral"
+                          - mood: "energetic", "calm", "professional"
+                          - style: "modern", "vintage", "minimalist"
+                          - duration: "short", "medium", "long"
+    
+    Returns:
+        A dictionary containing:
+        - success: Boolean indicating if analysis was successful
+        - message: Status message describing the result
+        - video_description: Generated video description for the AI generator
+        - trend_analysis: Comprehensive trend analysis results
+        - recommendations: Specific recommendations for video creation
+        - technical_specifications: Technical specs optimized for the generator
+        - analysis_metadata: Information about the analysis process
+        - error: Error details if analysis failed
+    """
+    # Input validation
+    if isinstance(brand_names, str):
+        if not brand_names or not brand_names.strip():
+            return {
+                "success": False,
+                "message": "Brand name must be provided and cannot be empty.",
+                "video_description": "",
+                "error": "Missing or empty brand name"
+            }
+        brand_list = [brand_names.strip()]
+        is_single = True
+    elif isinstance(brand_names, list):
+        if not brand_names or all(not name or not str(name).strip() for name in brand_names):
+            return {
+                "success": False,
+                "message": "At least one valid brand name must be provided.",
+                "video_description": "",
+                "error": "Missing or empty brand names"
+            }
+        brand_list = [str(name).strip() for name in brand_names if name and str(name).strip()]
+        is_single = False
+    else:
+        return {
+            "success": False,
+            "message": "Brand names must be a string or list of strings.",
+            "video_description": "",
+            "error": "Invalid input type"
+        }
+    
+    if not user_query or not user_query.strip():
+        return {
+            "success": False,
+            "message": "User query must be provided and cannot be empty.",
+            "video_description": "",
+            "error": "Missing or empty user query"
+        }
+    
+    # Validate generator type
+    valid_generators = ['veo', 'runway', 'pika', 'stable_video', 'sora']
+    if generator_type.lower() not in valid_generators:
+        generator_type = 'veo'  # Default to Veo
+    
+    # Validate limit parameter
+    if limit is not None:
+        if not isinstance(limit, int) or limit <= 0:
+            return {
+                "success": False,
+                "message": "Limit must be a positive integer.",
+                "video_description": "",
+                "error": "Invalid limit parameter"
+            }
+        if limit > 500:
+            limit = 500  # Cap at 500 for reasonable performance
+    
+    # Validate country parameter
+    if country is not None:
+        if not isinstance(country, str) or len(country) != 2:
+            return {
+                "success": False,
+                "message": "Country must be a valid 2-letter country code (e.g., 'US', 'CA').",
+                "video_description": "",
+                "error": "Invalid country code format"
+            }
+        country = country.upper()
+    
+    try:
+        # Get API key first
+        get_scrapecreators_api_key()
+        
+        # Step 1: Get platform IDs for brands
+        if is_single:
+            platform_ids = get_platform_id(brand_list[0])
+            platform_list = list(platform_ids.values())
+        else:
+            batch_results = get_platform_ids_batch(brand_list)
+            platform_list = []
+            for brand_results in batch_results.values():
+                platform_list.extend(list(brand_results.values()))
+        
+        if not platform_list:
+            brand_desc = brand_list[0] if is_single else f"{len(brand_list)} brands"
+            return {
+                "success": False,
+                "message": f"No platform IDs found for '{brand_desc}' in the Meta Ad Library.",
+                "video_description": "",
+                "error": "No platform IDs found"
+            }
+        
+        # Step 2: Get ads for all platform IDs
+        ads_results = get_ads_batch(platform_list, limit or 50, country, trim=True)
+        
+        # Combine all ads into a single list
+        all_ads = []
+        for platform_id, ads in ads_results.items():
+            all_ads.extend(ads)
+        
+        if not all_ads:
+            return {
+                "success": False,
+                "message": "No ads found for analysis.",
+                "video_description": "",
+                "error": "No ads data available"
+            }
+        
+        # Step 3: Analyze trends
+        trend_analysis = trend_analysis_service.analyze_trends_from_ads(all_ads)
+        
+        if not trend_analysis.get('success'):
+            return {
+                "success": False,
+                "message": f"Trend analysis failed: {trend_analysis.get('message', 'Unknown error')}",
+                "video_description": "",
+                "error": trend_analysis.get('error')
+            }
+        
+        # Step 4: Generate video description
+        video_description_result = video_generator_service.generate_video_description(
+            user_query.strip(),
+            trend_analysis,
+            generator_type.lower(),
+            style_preferences
+        )
+        
+        if not video_description_result.get('success'):
+            return {
+                "success": False,
+                "message": f"Video description generation failed: {video_description_result.get('message', 'Unknown error')}",
+                "video_description": "",
+                "error": video_description_result.get('error')
+            }
+        
+        # Prepare response
+        brand_desc = brand_list[0] if is_single else f"{len(brand_list)} brands"
+        
+        return {
+            "success": True,
+            "message": f"Successfully analyzed trends from {len(all_ads)} ads for '{brand_desc}' and generated video description for {generator_type.upper()}",
+            "video_description": video_description_result.get('video_description', ''),
+            "trend_analysis": trend_analysis.get('trends', {}),
+            "recommendations": video_description_result.get('recommendations', {}),
+            "technical_specifications": video_description_result.get('technical_specifications', {}),
+            "analysis_metadata": {
+                "brands_analyzed": brand_list,
+                "platform_ids_found": len(platform_list),
+                "ads_analyzed": len(all_ads),
+                "generator_type": generator_type.lower(),
+                "user_query": user_query.strip(),
+                "analysis_timestamp": trend_analysis.get('analysis_metadata', {}).get('analyzed_at'),
+                "trend_insights_used": video_description_result.get('trend_insights_used', {})
+            },
+            "ad_library_url": "https://www.facebook.com/ads/library/",
+            "source_citation": f"[Facebook Ad Library - {brand_desc}](https://www.facebook.com/ads/library/)",
+            "error": None
+        }
+        
+    except CreditExhaustedException as e:
+        brand_desc = brand_list[0] if is_single else f"{len(brand_list)} brands"
+        return {
+            "success": False,
+            "message": f"ScrapeCreators API credits exhausted while analyzing trends for '{brand_desc}'. Please top up your account at {e.topup_url} to continue using the Facebook Ads Library.",
+            "video_description": "",
+            "credit_info": {
+                "credits_remaining": e.credits_remaining,
+                "topup_url": e.topup_url
+            },
+            "error": f"Credit exhaustion: {str(e)}"
+        }
+    except RateLimitException as e:
+        brand_desc = brand_list[0] if is_single else f"{len(brand_list)} brands"
+        return {
+            "success": False,
+            "message": f"ScrapeCreators API rate limit exceeded while analyzing trends for '{brand_desc}'. Please wait {e.retry_after or 'a few minutes'} before making more requests.",
+            "video_description": "",
+            "error": f"Rate limit exceeded: {str(e)}"
+        }
+    except requests.exceptions.RequestException as e:
+        brand_desc = brand_list[0] if is_single else f"{len(brand_list)} brands"
+        return {
+            "success": False,
+            "message": f"Network error while analyzing trends for '{brand_desc}': {str(e)}",
+            "video_description": "",
+            "error": f"Network error: {str(e)}"
+        }
+    except Exception as e:
+        brand_desc = brand_list[0] if is_single else f"{len(brand_list)} brands"
+        return {
+            "success": False,
+            "message": f"Failed to analyze trends for '{brand_desc}': {str(e)}",
+            "video_description": "",
+            "error": str(e)
+        }
+
+
+@mcp.tool(
+  description="Generate optimized video descriptions for AI video generators based on existing ads data and user requirements. This tool takes ads data and creates tailored prompts for video generators like Veo, Runway, Pika, etc.",
+  annotations={
+    "title": "Generate Video Description",
+    "readOnlyHint": True,
+    "openWorldHint": True
+  }
+)
+def generate_video_description(
+    ads_data: List[Dict[str, Any]],
+    user_query: str,
+    generator_type: str = "veo",
+    style_preferences: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Generate optimized video description for AI video generators based on ads data.
+    
+    This endpoint analyzes provided ads data and generates optimized video descriptions
+    for AI video generators like Veo, Runway, Pika, etc.
+    
+    Args:
+        ads_data: List of ad objects from Facebook Ads Library (from get_meta_ads).
+        user_query: User's original request/query for video generation.
+                    Example: "Create a trending fitness video for social media"
+        generator_type: Type of video generator to optimize for (default: "veo").
+                       Options: "veo", "runway", "pika", "stable_video", "sora"
+        style_preferences: Optional style preferences dict with keys like:
+                          - color_scheme: "bright", "dark", "neutral"
+                          - mood: "energetic", "calm", "professional"
+                          - style: "modern", "vintage", "minimalist"
+                          - duration: "short", "medium", "long"
+    
+    Returns:
+        A dictionary containing:
+        - success: Boolean indicating if generation was successful
+        - message: Status message describing the result
+        - video_description: Generated video description for the AI generator
+        - trend_analysis: Trend analysis results from the ads data
+        - recommendations: Specific recommendations for video creation
+        - technical_specifications: Technical specs optimized for the generator
+        - analysis_metadata: Information about the analysis process
+        - error: Error details if generation failed
+    """
+    # Input validation
+    if not ads_data or not isinstance(ads_data, list):
+        return {
+            "success": False,
+            "message": "Ads data must be provided as a non-empty list.",
+            "video_description": "",
+            "error": "Missing or invalid ads data"
+        }
+    
+    if not user_query or not user_query.strip():
+        return {
+            "success": False,
+            "message": "User query must be provided and cannot be empty.",
+            "video_description": "",
+            "error": "Missing or empty user query"
+        }
+    
+    # Validate generator type
+    valid_generators = ['veo', 'runway', 'pika', 'stable_video', 'sora']
+    if generator_type.lower() not in valid_generators:
+        generator_type = 'veo'  # Default to Veo
+    
+    try:
+        # Step 1: Analyze trends from ads data
+        trend_analysis = trend_analysis_service.analyze_trends_from_ads(ads_data)
+        
+        if not trend_analysis.get('success'):
+            return {
+                "success": False,
+                "message": f"Trend analysis failed: {trend_analysis.get('message', 'Unknown error')}",
+                "video_description": "",
+                "error": trend_analysis.get('error')
+            }
+        
+        # Step 2: Generate video description
+        video_description_result = video_generator_service.generate_video_description(
+            user_query.strip(),
+            trend_analysis,
+            generator_type.lower(),
+            style_preferences
+        )
+        
+        if not video_description_result.get('success'):
+            return {
+                "success": False,
+                "message": f"Video description generation failed: {video_description_result.get('message', 'Unknown error')}",
+                "video_description": "",
+                "error": video_description_result.get('error')
+            }
+        
+        return {
+            "success": True,
+            "message": f"Successfully generated video description for {generator_type.upper()} based on {len(ads_data)} ads",
+            "video_description": video_description_result.get('video_description', ''),
+            "trend_analysis": trend_analysis.get('trends', {}),
+            "recommendations": video_description_result.get('recommendations', {}),
+            "technical_specifications": video_description_result.get('technical_specifications', {}),
+            "analysis_metadata": {
+                "ads_analyzed": len(ads_data),
+                "generator_type": generator_type.lower(),
+                "user_query": user_query.strip(),
+                "analysis_timestamp": trend_analysis.get('analysis_metadata', {}).get('analyzed_at'),
+                "trend_insights_used": video_description_result.get('trend_insights_used', {})
+            },
+            "error": None
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Failed to generate video description: {str(e)}",
+            "video_description": "",
+            "error": str(e)
+        }
 
 
 @mcp.tool(

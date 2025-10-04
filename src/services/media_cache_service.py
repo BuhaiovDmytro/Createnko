@@ -171,6 +171,41 @@ class MediaCacheService:
         """Retrieve cached image data (backward compatibility)."""
         return self.get_cached_media(url, media_type='image')
     
+    def get_analysis_results(self, url: str) -> Optional[Dict[str, Any]]:
+        """Retrieve cached analysis results for a media URL."""
+        url_hash = self._generate_url_hash(url)
+        
+        with sqlite3.connect(CACHE_DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT analysis_results, analysis_cached_at
+                FROM media_cache 
+                WHERE url_hash = ? AND analysis_results IS NOT NULL
+            """, (url_hash,))
+            
+            row = cursor.fetchone()
+            if row:
+                # Update last accessed timestamp
+                cursor.execute("""
+                    UPDATE media_cache 
+                    SET last_accessed = CURRENT_TIMESTAMP 
+                    WHERE url_hash = ?
+                """, (url_hash,))
+                
+                try:
+                    analysis_data = json.loads(row['analysis_results'])
+                    return {
+                        'analysis': analysis_data,
+                        'cached_at': row['analysis_cached_at']
+                    }
+                except json.JSONDecodeError:
+                    logger.warning(f"Failed to parse analysis results for {url}")
+                    return None
+            
+            return None
+    
     def cache_media(self, url: str, media_data: bytes, content_type: str, 
                    media_type: str = 'image', brand_name: str = None, ad_id: str = None, 
                    analysis_results: Dict[str, Any] = None, duration_seconds: float = None,
